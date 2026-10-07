@@ -213,12 +213,14 @@ __marimo__/
 .DS_Store
 
 # Model weights and exports. They are large binaries and are kept out of git;
-# docs/MODELS.md says which file each program needs and where it comes from.
+# they are downloaded from the models-v1 release (see docs/MODELS.md).
 *.pt
 *.onnx
 *.task
 *.mlpackage/
+*.mlpackage.zip
 *.mlmodel
+SHA256SUMS.txt
 
 # Ultralytics run output and benchmark logs (logs hold participant data).
 runs/
