@@ -14,14 +14,29 @@ what was added, why, what went wrong, and the order to build it in if you start 
 🧩 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — modules, threads, the contract between
 vision and logic, the MIDI that leaves the program, and every tunable constant.
 
-📦 **[docs/MODELS.md](docs/MODELS.md)** — which model file each program needs and where it
-comes from. No weights are stored in this repository.
+🧪 **[docs/MODEL_PROCEDURES.md](docs/MODEL_PROCEDURES.md)** — every detector trained for the
+instrument, in the order it was made, with the procedure that produced it.
+
+📦 **[docs/MODELS.md](docs/MODELS.md)** — which model file each program needs and how to
+download it. The trained weights are in the
+[`models-v1` release](../../releases/tag/models-v1).
 
 🔬 **[midi-gesture-research](https://github.com/hg5210187-ai/midi-gesture-research)** — the
 companion study that chose the detector: 114 training runs, accuracy by cross-validation,
 latency measured on the laptop the instrument runs on.
 
 ---
+
+> ### ⭐ Preferred model: `hbb-s-fold1-320`
+>
+> The research compared 38 model configurations over 114 training runs. The one it chose is
+> **YOLO26-s with plain boxes at 320 px, run under Core ML**: the most accurate model that
+> holds a 10 ms budget on a MacBook Air M4 for 15 continuous minutes (7.93 ms median,
+> 0.8056 ± 0.0437 mAP50-95). `main_obb.py` runs it.
+>
+> [Why it was chosen](https://github.com/hg5210187-ai/midi-gesture-research/blob/main/REPORT.md#9-the-deployment-choice)
+> · [How it was made](docs/MODEL_PROCEDURES.md#7--the-research-study-and-hbb-s-fold1-320)
+> · [Download](docs/MODELS.md#download)
 
 ## How you play it
 
@@ -47,62 +62,66 @@ scales, UI and overlay, and differ in how they see the hands.
 
 | Program | Detector | Model file | What it is |
 |---|---|---|---|
-| `main_mediapipe.py` | MediaPipe HandLandmarker | `hand_landmarker.task` (public download) | Easiest to start with. Added because the YOLO hand-pose model fired on faces and curtains |
-| `main.py` | YOLOv8n hand-pose, 21 keypoints | `yolov8n-hand-pose.pt` | The first working version. Right hand from its box, left-hand fist from keypoints |
+| ⭐ `main_obb.py` | YOLO26-s detect, 3 gesture classes | `hbb-s-fold1-320.mlpackage` or `.pt` | **The current version and the one to use.** One model for both hands, Core ML, lowest latency |
 | `main_rotate.py` | YOLO26 OBB, 3 gesture classes | `YOLO26<size>-MIDI.pt` | Pitch from rotating the hand. Five model sizes, `--model n\|s\|m\|l\|x` |
-| `main_obb.py` | YOLO26-s detect, 3 gesture classes | `hbb-s-fold1-320.mlpackage` or `.pt` | The current version: one model for both hands, Core ML, lowest latency |
+| `main.py` | YOLOv8n hand-pose, 21 keypoints | `yolov8n-hand-pose.pt` | The first working version. Right hand from its box, left-hand fist from keypoints |
+| `main_mediapipe.py` | MediaPipe HandLandmarker | `hand_landmarker.task` (public download) | Needs no trained weights. Added because the YOLO hand-pose model fired on faces and curtains |
 
 `main_obb.py` keeps the name of the oriented-box experiment it started as. It now runs the
 axis-aligned model chosen by the research study.
 
 ## Quick start (macOS)
 
-Developed on a MacBook Air M4. It needs a webcam, Python 3.12 with Tk, and
-[uv](https://docs.astral.sh/uv/).
+Developed on a MacBook Air M4. It needs a webcam, Python 3.12 with Tk,
+[uv](https://docs.astral.sh/uv/), and the [GitHub CLI](https://cli.github.com/) to fetch the
+models.
+
+Clone this repository, then from inside it:
 
 ```bash
-brew install python@3.12 python-tk@3.12 uv
-git clone https://github.com/hg5210187-ai/gesture-midi-instrument.git
-cd gesture-midi-instrument
+brew install python@3.12 python-tk@3.12 uv gh
 uv sync
+uv run python tests/check_headless.py     # ends with ALL PASS; needs no camera or MIDI port
 ```
 
 `pyproject.toml` tells uv to use the system (Homebrew) Python, because the UI needs Tk and
 `python-tk@3.12` provides it.
 
-Check the install without a camera or a MIDI port:
-
-```bash
-uv run python tests/check_headless.py     # ends with ALL PASS
-```
-
-Then the shortest path to sound, using the MediaPipe program:
-
 1. **Turn on a MIDI bus.** Audio MIDI Setup → Window → Show MIDI Studio → IAC Driver →
    tick "Device is online". If no IAC port exists, the app creates a virtual port named
    `Indigo Gesture Controller` instead.
-2. **Get the hand model** (7.8 MB, from Google):
-   ```bash
-   curl -L -o hand_landmarker.task \
-     https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
-   ```
-3. **Open something that plays MIDI** from the IAC bus: a DAW instrument track, or any
+2. **Open something that plays MIDI** from the IAC bus: a DAW instrument track, or any
    General MIDI synth.
+3. **Get the preferred model** from the [`models-v1` release](../../releases/tag/models-v1):
+   ```bash
+   gh release download models-v1 --pattern 'hbb-s-fold1-320.*'
+   unzip hbb-s-fold1-320.mlpackage.zip && rm hbb-s-fold1-320.mlpackage.zip
+   ```
+   Or download the two files from the release page in a browser and put them in this folder.
 4. **Run it.** macOS asks once for camera permission.
    ```bash
-   uv run python main_mediapipe.py
+   uv run python main_obb.py
    ```
 5. Hold your right hand far from the camera, press **Calibrate Min**, then move it closer.
    That sets the size that means silence.
 
-The other programs start the same way once their model file is in the project root
-(see [docs/MODELS.md](docs/MODELS.md)):
+### The other programs
 
 ```bash
-uv run python main.py
+# Rotation instrument: pitch from tilting the hand
+gh release download models-v1 --pattern 'YOLO26s-MIDI.pt'
 uv run python main_rotate.py --model s
-uv run python main_obb.py
+
+# MediaPipe: needs only a public download from Google (7.8 MB)
+curl -L -o hand_landmarker.task \
+  https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+uv run python main_mediapipe.py
+
+# YOLOv8 hand-pose: needs yolov8n-hand-pose.pt, which is not distributed here
+uv run python main.py
 ```
+
+Every model file goes in the project root. [docs/MODELS.md](docs/MODELS.md) lists them all.
 
 ## Settings panel
 
@@ -194,7 +213,7 @@ run_benchmark.py  experiment_*.py  task_engine.py  run_dry_run.py
                         playability benchmark: 3 pitch sensitivities × 4 scale types
 tests/check_headless.py feeds synthetic detections through all three logic modules
 YOLO26<size>-ver        provenance of each rotation model (training date, mAP, speed)
-docs/                   build record, architecture, models
+docs/                   build record, architecture, model procedures, models
 ```
 
 ## Limits

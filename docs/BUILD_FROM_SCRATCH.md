@@ -4,7 +4,8 @@ How a webcam became a playable MIDI instrument, in the order it happened, and th
 to build it in if you start from zero.
 
 The first part is a record. Each stage says what was added, the file that holds it today,
-and what went wrong. Dates come from the commit history and the project log; where only a
+and what went wrong. The training procedure of every model is set out separately, in
+[MODEL_PROCEDURES.md](MODEL_PROCEDURES.md). Dates come from the commit history and the project log; where only a
 file date survives, the stage says so. The second part is a recipe. The third lists what was
 still open at the last entry.
 
@@ -19,7 +20,7 @@ still open at the last entry.
 | [7](#stage-7--the-first-self-trained-detector) | 2026-06-28 | A right-hand oriented-box model, trained on 209 images |
 | [8](#stage-8--three-programs-instead-of-one) | 2026-06-28 | The pipelines split into separate programs; MediaPipe added |
 | [9](#stage-9--one-model-for-both-hands-and-pitch-from-rotation) | 2026-07-17 to 08-02 | One model with gesture classes; the rotation instrument |
-| [10](#stage-10--choosing-the-detector-by-measurement) | August 2026 | The detection study picks the model (separate repository) |
+| [10](#stage-10--choosing-the-detector-by-measurement) | August 2026 | The detector is measured twice; the second, published study picks the model |
 | [11](#stage-11--cut-the-latency) | 2026-10-05 | Latest-frame capture, one model, Core ML: about 56 ms down to under 10 ms |
 
 ---
@@ -301,9 +302,10 @@ beside it recording where it came from, which `src/vision_yolo26.py` prints at s
 | l | 2026-07-31, at 640 px | 0.80 | ~24 fps |
 | x | 2026-07-31, at 640 px | 0.37 | ~11 fps |
 
-Bigger was not better: the largest model scored lowest. These were single training runs,
-and the smallest was trained at a different resolution, so the table is a record, not a fair
-comparison.
+Bigger was not better: the largest model scored lowest. The cause was the procedure, not
+the architecture. Each was a single run with early stopping judged on 41 validation images,
+and training stopped at epoch 45, 43, 23, 63 and 19. The table ranks which run got unlucky
+first.
 
 **The rotation instrument, `main_rotate.py`.** The oriented box finally gave the angle, and a
 fourth program uses it: rotate the right hand to change pitch.
@@ -322,9 +324,20 @@ turns. A dial on the video shows the angle.
 
 ### Stage 10 — Choosing the detector by measurement
 
-**August 2026.** Until then each detector had been chosen by trying it. This time it was
-measured, in a separate repository:
-**[midi-gesture-research](https://github.com/hg5210187-ai/midi-gesture-research)**.
+**August 2026.** Until then each detector had been chosen by trying it. In August it was
+measured, twice.
+
+**First on the rotation models' own data, 2026-08-03 to 08-07.** More photos of the rare
+gestures took the dataset from 203 to 390 images. The five sizes were retrained under one
+fixed recipe with early stopping off, over five folds grouped by capture minute, and scored
+on a held-out test set. The result: **model size made no measurable difference.** The gap
+between the best and worst size was smaller than the gap between two folds of one size. The
+smallest model was kept, `MIDI-gesture-model.pt`, at 0.748 mAP50-95 on 54 test images. That
+study still had one hand per image and measured speed through PyTorch only.
+
+**Then as a published study, from 2026-08-11:**
+**[midi-gesture-research](https://github.com/hg5210187-ai/midi-gesture-research)**. A new
+dataset of 60 photographs with both hands in every frame, shot in 12 places.
 
 114 training runs: YOLO26 in 5 sizes × 2 box geometries × 3 resolutions × 3 folds, and
 DEIMv2 in 8 variants × 3 folds. Accuracy by 3-fold cross-validation with folds disjoint by
@@ -350,6 +363,10 @@ Three of its findings changed how the instrument was built:
 
 The chosen model is axis-aligned, so it carries no angle. The current program reads pitch
 from height again, and the rotation instrument stays on the oriented-box models.
+
+The instrument uses one checkpoint of that configuration, **`hbb-s-fold1-320`**, the
+preferred model. [MODEL_PROCEDURES.md](MODEL_PROCEDURES.md) gives the procedure for it and
+for every model before it.
 
 ### Stage 11 — Cut the latency
 
@@ -477,9 +494,9 @@ maximum box size, a fist that must be held, a release that must be sustained, a 
 each frame. Add a debug print of raw detections before tuning any of them.
 
 **10. Only then replace the detector.** Collect images, train a model, compare it on the
-machine it will run on, export it to the runtime it will run in. The protocol and the
-training drivers are in
-[midi-gesture-research](https://github.com/hg5210187-ai/midi-gesture-research). Because the
+machine it will run on, export it to the runtime it will run in. The procedures used here
+are in [MODEL_PROCEDURES.md](MODEL_PROCEDURES.md); the protocol and the training drivers are
+in [midi-gesture-research](https://github.com/hg5210187-ai/midi-gesture-research). Because the
 logic only reads boxes, a class and a confidence, a new detector is one new `vision_*.py`
 file.
 
