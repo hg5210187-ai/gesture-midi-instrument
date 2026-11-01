@@ -38,7 +38,7 @@ class HbbVision(LatestFrameCamera):
 
     def __init__(self, model=None, device=None, imgsz=None,
                  cam_width=640, cam_height=480,
-                 camera_index=None, camera_fps=None):
+                 camera_index=None, camera_fps=None, task="detect"):
         model = model or os.environ.get("HBB_MODEL")
         if model is None:
             model = "hbb-s-fold1-320.mlpackage"
@@ -47,7 +47,9 @@ class HbbVision(LatestFrameCamera):
         model_path = _resolve_model(model)
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Gesture model not found: {model_path}")
-        self.model = YOLO(model_path, task="detect")
+        # task="pose" loads a hand-pose model instead (main_cubase_lite.py
+        # --model v8): same camera thread and timing, results with keypoints.
+        self.model = YOLO(model_path, task=task)
 
         if device is None:
             device = os.environ.get("HBB_DEVICE") or (

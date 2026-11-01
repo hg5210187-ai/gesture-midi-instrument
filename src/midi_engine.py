@@ -3,14 +3,33 @@ import os
 import time
 
 class MidiEngine:
-    def __init__(self, port_name="Indigo Gesture Controller"):
+    def __init__(self, port_name="Indigo Gesture Controller", port=None, dedupe_cc=()):
         self.port_name = port_name
         self.outport = None
-        
+
+        # Controllers listed in ``dedupe_cc`` (e.g. 7, volume) are sent only when
+        # their value changes, so a DAW recording isn't filled with repeats.
+        self._dedupe_cc = frozenset(dedupe_cc)
+        self._last_cc = {}
+
         # Check available ports first
         available_ports = mido.get_output_names()
         print(f"Available MIDI Outputs: {available_ports}")
-        
+
+        # ``port`` opens exactly that output, with no fallback: the Cubase
+        # version sends notes and control messages to two different buses, and
+        # landing on the wrong one would record control messages as notes.
+        if port is not None:
+            if port in available_ports:
+                try:
+                    self.outport = mido.open_output(port)
+                    print(f"✅ Connected to MIDI output: '{port}'")
+                except Exception as e:
+                    print(f"❌ Failed to open MIDI output '{port}': {e}")
+            else:
+                print(f"⚠️ MIDI output '{port}' not found; nothing will be sent to it.")
+            return
+
         # MIDI_PORT picks a specific output by (partial) name. Otherwise use the
         # macOS IAC Driver bus, which any DAW (Cubase, GarageBand, ...) can
         # listen to as a MIDI input.
@@ -50,8 +69,34 @@ class MidiEngine:
     def send_cc(self, control, value, channel=0):
         """Send a Control Change message (e.g., volume CC=7)."""
         if self.outport:
+            if control in self._dedupe_cc:
+                if self._last_cc.get((channel, control)) == value:
+                    return
+                self._last_cc[(channel, control)] = value
             msg = mido.Message('control_change', control=control, value=value, channel=channel)
             self.outport.send(msg)
+
+    def send_cc_forced(self, control, value, channel=0):
+        """Send a Control Change even if de-duplication would drop it (the
+        volume right before a note, so a recording has it)."""
+        if self.outport:
+            if control in self._dedupe_cc:
+                self._last_cc[(channel, control)] = value
+            msg = mido.Message('control_change', control=control, value=value, channel=channel)
+            self.outport.send(msg)
+
+    def resend_cc(self, control, channel=0):
+        """Send a de-duplicated controller again at its last value, if one was
+        sent (e.g. the volume, just before a note re-sent for a recording)."""
+        value = self._last_cc.get((channel, control))
+        if self.outport and value is not None:
+            msg = mido.Message('control_change', control=control, value=value, channel=channel)
+            self.outport.send(msg)
+
+    def reset_cc_cache(self):
+        """Forget the last de-duplicated values, so the next ones are sent again
+        (e.g. after switching to another DAW track, whose volume is unknown)."""
+        self._last_cc.clear()
 
     def send_program_change(self, program, channel=0):
         """Switch the instrument/patch on a channel (General MIDI program 0-127).

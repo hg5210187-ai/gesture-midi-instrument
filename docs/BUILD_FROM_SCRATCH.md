@@ -22,6 +22,7 @@ still open at the last entry.
 | [9](#stage-9--one-model-for-both-hands-and-pitch-from-rotation) | 2026-07-17 to 08-02 | One model with gesture classes; the rotation instrument |
 | [10](#stage-10--choosing-the-detector-by-measurement) | August 2026 | The detector is measured twice; the second, published study picks the model |
 | [11](#stage-11--cut-the-latency) | 2026-10-05 | Latest-frame capture, one model, Core ML: about 56 ms down to under 10 ms |
+| [12](#stage-12--a-cubase-version) | 2026-10-28 | `main_cubase.py`: the fist records loops in Cubase, the app switches Cubase tracks |
 
 ---
 
@@ -427,6 +428,102 @@ Things that broke:
   hands drop out, lower `min_confidence` in `src/logic_obb.py`.
 - At 30 fps the fist had to be held for 5 frames instead of 3 to keep the same 150 ms.
 
+### Stage 12 — A Cubase version
+
+**2026-10-28.** Cubase LE AI Elements 13 replaced GarageBand as the instrument's home. Since
+stage 11 Cubase could already play the notes from the IAC bus. What a DAW adds over GarageBand
+is that it can be controlled, so `main_cubase.py` was written beside `main_obb.py`, with the
+same detector and logic:
+
+- **The fist records loops in Cubase** instead of in the app. `CubaseTransport`
+  (`src/cubase_control.py`) has the looper's three states and `toggle()`, so
+  `src/logic_obb.py` did not change. It sends control changes on channel 16 to a second IAC
+  bus. A MIDI Remote script, `cubase/midi_remote/indigo/gestureinstrument/`, binds them to
+  record, cycle, stop and go to left locator. The loop is now a MIDI part in the project;
+  its length is the cycle range.
+- **A Cubase Track menu** replaced the Number of Tracks slider, a leftover of the GarageBand
+  keystrokes in stage 1. It selects one of the first 8 instrument, sampler or MIDI tracks.
+- **The Instrument menu works.** GarageBand ignored Program Change; HALion Sonic follows it
+  with GM Mode on.
+- **CC 7 only when it changes**, so recordings are not filled with repeats.
+
+Choices made to avoid failures that a second MIDI bus invites (details in
+[ARCHITECTURE.md](ARCHITECTURE.md#cubase-version)):
+- an input-only script, so nothing Cubase sends can loop back;
+- absolute values instead of toggles;
+- exact port names with no fallback, because the old fallback would have put control
+  messages on the notes bus;
+- the track switch applied on the vision thread after releasing the sounding note.
+
+Checked without Cubase:
+- the headless checks;
+- the control messages through a real CoreMIDI port;
+- the script run in Node against the API stub that ships with Cubase.
+
+**2026-10-29, a light window.** In the first real run the menus did not respond and the
+playing felt late. The full window enlarges each frame to fill the screen: 95 ms per redraw
+on a maximised window, redrawn every 40 ms. With it open, the gesture model's time per frame
+rose from 10 ms to 19 ms on average, with stalls up to 210 ms. `main_cubase_lite.py` keeps the
+instrument and swaps the window for `src/ui_lite.py`: the picture at the camera's 640×480 in
+one reused Tk image (29 ms per redraw, model back at 9 ms), Scale and Root Note starting on
+D minor, a Calibrate button, and sounds and tracks chosen in Cubase. A
+1 / 2 octave switch followed; both ranges end on the root (D4–D5, D4–D6).
+
+**2026-10-30, the heaviest model.** `main_cubase_lite.py --model x` runs the same window with
+`hbb-x-fold0-416`, exported to Core ML from the research study's checkpoint: the most accurate
+YOLO26 model on the study's test photos (0.815 against 0.732 for the deployed s checkpoint),
+24 ms per frame against 7. The window shows the model and its detection time, so the two can
+be compared on screen.
+
+**2026-10-30, layered loops.** The left hand now records one track after another: fist =
+record → play, a fist kept 2 s while the loops play = record on the next track, thumb out =
+stop. Making the hold reliable exposed a bug in the fist debounce: a fist seen again after a
+dropout of a frame or two was taken as a new fist, so a held fist could toggle a second time.
+It is now the same fist.
+
+**2026-10-30, the YOLOv8 model in Cubase.** `main_cubase_lite.py --model v8` brings the first
+working version's model, `yolov8n-hand-pose`, into the same Cubase setup, with `main.py`'s
+keypoint logic. With PyTorch on the GPU it took 61 ms per frame, so it was exported to Core ML
+(17 ms alone, 33 ms beside the window). Thumb out had no class in this model; it is read
+from the keypoints, with the threshold set on the study's 120 labelled hands.
+
+**2026-10-31, the first recording sets the loop.** With the loop fixed to a cycle range set
+beforehand (8 bars in the test project), a short phrase was followed by empty bars before it
+came round again. Now the first recording runs with cycle off from the left locator, and the
+fist that ends it sets the right locator at the playhead (a new script command, CC 106 → "Set
+Right Locator"), turns cycle on and jumps back, so the loop is exactly what was played and
+every later layer records over the same cycle. In the first try the second layer landed after
+the loop: the cycle-on and jump sent with the record-off were dropped while Cubase finished the
+recording, so the transport played on. They now follow 0.2 s later, and every new layer turns
+cycle on again and starts from the loop's start. A note already held when recording started
+was missing from the part, which had only its volume changes; it is now sent again 0.15 s
+after recording starts. That alone did not fix it: Cubase's count-in (1 bar) was on, so
+recording began 2 s after the fist. Starting playback and punching in skipped the count-in,
+which the user wanted, so instead the re-send waited for a 2-s count-in. Their Cubase then
+turned out to have the count-in off and the metronome click on (click while recording, no
+count-in), so the count-in is now assumed off (0.2 s from a stop; `CUBASE_COUNT_IN_BARS` and
+`CUBASE_TEMPO` if it is on). Looped first notes also
+played too quietly: the volume was sent after the note and only when it changed, so such a
+note had no volume of its own in the part. The volume now goes before every note.
+
+A layer that kept recording into a second pass merged the two (MIDI cycle record mode Mix)
+and sounded wrong, so a layer now stops recording by itself after one pass of the loop, timed
+from the first recording's measured length, 0.25 s early. Layers also turned out to start
+wherever the loop was when the fist was held: the jump to the start and record-on, sent
+together, were taken in the wrong order. Record-on now follows the jump by 0.15 s.
+
+A screen recording of a session showed two more things. Cubase's cycle stayed on during the
+first recording, because the cycle-off sent with the jump and record-on was ignored, so a take
+longer than the previous loop wrapped and recorded over its own start; the first fist now
+waits 0.15 s after the cycle-off. And an extra note ringing under a whole part began where the
+detection had flickered to another pitch for one frame: a note of a few hundredths of a second
+whose end Cubase lost. In the Cubase apps a note now lasts at least 0.08 s before the pitch can
+change.
+
+Stopping a layer just before the loop end left a gap of about 0.2 s at the end of each layer.
+It now stops just after the loop comes round, and Cubase's MIDI Cycle Record Mode is set to
+Keep Last, which keeps the one complete pass and discards the unfinished one.
+
 ---
 
 ## Part 2 — Building it from zero
@@ -504,10 +601,22 @@ file.
 
 ## Part 3 — Open at the last entry
 
-As of 2026-10-05:
+As of 2026-10-29:
 
 - The Core ML program was checked with synthetic boxes and with timed runs of the real app.
   Playing it with real hands while listening in the DAW was not recorded as done.
+- `main_cubase.py` has not been run with Cubase. Cubase does detect the input-only script on
+  `IAC Driver Bus 2`; command bindings must use key-command names ('To Left Locator', not the
+  newer menu label). Selecting a track and switching cycle off and on, sent through
+  `CubaseTransport` on Bus 2, worked in Cubase (2026-10-29). Open there:
+  - whether the three channel filters combine into one track bank;
+  - whether record off during cycle recording keeps the transport playing;
+  - whether HALion Sonic's GM Mode follows the Instrument menu.
+- `main_cubase_lite.py` was checked with synthetic frames only (window, controls, drawing
+  time, model time per frame). Its first run with real hands in Cubase is still to come.
+- The right hand has no tolerance for a missed frame: one frame without a detection stops the
+  note, and the next starts it again. The left hand waits 5 frames. In live playing this shows
+  as flicker and cut-offs.
 - `min_confidence` 0.6 and `max_box_area` 0.30 were tuned for the earlier oriented-box model,
   and volume needs re-calibrating because the new boxes have a different shape.
 - Accuracy of pitch and volume with the right-hand model at 256 px was not checked.

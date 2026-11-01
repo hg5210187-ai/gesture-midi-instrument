@@ -183,7 +183,8 @@ def render_overlay(frame, logic):
     looper = getattr(logic, "looper", None)
     if looper is not None and getattr(looper, "state", None):
         state = looper.state
-        _draw_status_badge(frame, f"LOOP: {state}",
+        # CubaseTransport labels itself "CUBASE"; MidiLooper has no label.
+        _draw_status_badge(frame, f"{getattr(looper, 'label', 'LOOP')}: {state}",
                            _LOOP_COLORS.get(state, (150, 150, 150)), (10, 12))
 
     is_theremin = (logic.scale_type == "theremin")

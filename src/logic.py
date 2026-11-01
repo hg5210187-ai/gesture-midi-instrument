@@ -16,6 +16,11 @@ class GestureLogic:
 
         # Right hand state
         self.current_pitch_note = -1
+        # Shortest note before the pitch may change again (0 = no limit). The
+        # Cubase versions set it, because a one-frame flicker made notes of a
+        # few hundredths of a second whose ends Cubase sometimes lost.
+        self.min_note_s = 0.0
+        self._note_on_time = 0.0
 
         # Scale mapping (default Chromatic A2)
         self.scale = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]
@@ -31,6 +36,19 @@ class GestureLogic:
         # background/face as a fist) can't toggle the looper.
         self._fist_frames = 0
         self._fist_confirm_frames = 3
+
+        # Layered Cubase loops (a looper with hold() and stop(), i.e.
+        # CubaseTransport): a fist kept _hold_seconds after it toggled calls
+        # hold(), a sustained thumb out calls stop(), and a fist survives a
+        # left-hand dropout of up to _left_release_frames frames. With the
+        # in-app looper none of this applies and the left hand works as before.
+        self._hold_seconds = 2.0
+        self._hold_start = None
+        self._thumb_frames = 0
+        self._thumb_confirm_frames = 8
+        self._prev_thumb = False
+        self._left_absent_frames = 0
+        self._left_release_frames = 5
 
         # Throttle recording of continuous events
         self._last_recorded_volume = -1
@@ -190,8 +208,7 @@ class GestureLogic:
                 self._process_left_hand(kpts[left_hand['idx']])
         else:
             self.last_left_bbox = None
-            self._fist_frames = 0
-            self._prev_fist = False
+            self._left_lost()
 
     def _reject_stationary(self, bboxes):
         """Return a boolean keep-mask that drops boxes held still for many
@@ -269,8 +286,7 @@ class GestureLogic:
         self.last_right_area = None
         self.last_hand_y_norm = None
         self.last_hand_y_raw = None
-        self._fist_frames = 0
-        self._prev_fist = False
+        self._left_lost()
 
     def _silence_right_hand(self):
         # current_pitch_note tracks whatever is sounding, including the theremin
@@ -393,14 +409,38 @@ class GestureLogic:
 
     # ---- left hand / looper -----------------------------------------------
 
+    def _layered(self):
+        """True with a looper that layers Cubase loops (has hold())."""
+        return hasattr(self.looper, "hold")
+
+    def _left_lost(self):
+        """No left hand this frame. With the in-app looper the fist is released
+        at once (the original behaviour); with layered Cubase loops it is kept
+        through a dropout of up to ``_left_release_frames`` frames, so a held
+        fist that flickers is still the same fist."""
+        self._fist_frames = 0
+        self._thumb_frames = 0
+        self._left_absent_frames += 1
+        if not self._layered() or self._left_absent_frames >= self._left_release_frames:
+            self._prev_fist = False
+            self._prev_thumb = False
+            self._hold_start = None
+
     def _process_left_hand(self, landmarks):
         """Toggle the looper on a SUSTAINED fist.
 
         The fist must be held for ``_fist_confirm_frames`` consecutive frames
         before it counts, so a single-frame phantom (the pose model briefly
         mis-reading background/face as a fist) can't toggle the looper.
+
+        With layered Cubase loops, a fist with the thumb out counts as thumb
+        out instead: held ``_thumb_confirm_frames`` it calls stop(). The fist
+        kept ``_hold_seconds`` after it toggled calls hold().
         """
-        fist = self._is_fist(landmarks)
+        layered = self._layered()
+        self._left_absent_frames = 0
+        thumb = layered and self._is_thumb_out(landmarks)
+        fist = self._is_fist(landmarks) and not thumb
         self._fist_frames = self._fist_frames + 1 if fist else 0
         confirmed = self._fist_frames >= self._fist_confirm_frames
         now = time.time()
@@ -409,13 +449,52 @@ class GestureLogic:
         if confirmed and not self._prev_fist and (now - self._last_toggle_time) > self._toggle_cooldown:
             state = self.looper.toggle()
             self._last_toggle_time = now
+            self._hold_start = now
             # Reset recording throttles when starting a new recording
             if state == "RECORDING":
                 self._last_recorded_volume = -1
                 self._last_recorded_pitch = -99999
             print(f"Looper: {state}")
 
-        self._prev_fist = confirmed
+        if not layered:
+            self._prev_fist = confirmed
+            return
+
+        # Long hold: a left hand that is not a fist ends it.
+        if not fist:
+            self._hold_start = None
+        elif self._hold_start is not None and now - self._hold_start >= self._hold_seconds:
+            self._hold_start = None
+            print(f"Looper (fist held): {self.looper.hold()}")
+        # Released only by a left hand that is not a fist (or by a long
+        # absence, in _left_lost); a fist still being re-confirmed after a
+        # short dropout is the same fist.
+        if confirmed:
+            self._prev_fist = True
+        elif not fist:
+            self._prev_fist = False
+
+        self._thumb_frames = self._thumb_frames + 1 if thumb else 0
+        thumb_confirmed = self._thumb_frames >= self._thumb_confirm_frames
+        if thumb_confirmed and not self._prev_thumb and hasattr(self.looper, "stop"):
+            print(f"Looper (thumb out): {self.looper.stop()}")
+        if thumb_confirmed:
+            self._prev_thumb = True
+        elif not thumb:
+            self._prev_thumb = False
+
+    def _is_thumb_out(self, landmarks):
+        """Thumb out: the other fingers curled as in ``_is_fist``, and the thumb
+        tip more than one hand size (wrist to middle knuckle) from the palm
+        centre. On the gesture study's labelled photos (yolov8n-hand-pose at
+        384 px) this read 24 of 33 thumbs-out as thumb out, against 3 of 38
+        fists and 0 of 40 open hands."""
+        wrist = landmarks[0]
+        middle_knuckle = landmarks[9]
+        hand_size = max(0.01, np.linalg.norm(wrist - middle_knuckle))
+        palm_center = (wrist + middle_knuckle) / 2
+        return (self._is_fist(landmarks)
+                and np.linalg.norm(landmarks[4] - palm_center) / hand_size > 1.0)
 
     def _is_fist(self, landmarks):
         """Detect fist: fingertips close to palm center relative to hand size."""
@@ -507,13 +586,22 @@ class GestureLogic:
             # Re-arm the bend throttle so the first bend after the gate reopens
             # is recorded cleanly rather than being swallowed as "no change".
             self._last_recorded_pitch = -99999
-        elif midi_note != self.current_pitch_note:
-            # Gate open: (re)trigger the note when the pitch changes.
+        elif midi_note != self.current_pitch_note and (
+                self.current_pitch_note == -1
+                or time.time() - self._note_on_time >= self.min_note_s):
+            # Gate open: (re)trigger the note when the pitch changes (not
+            # before the current note has lasted min_note_s).
             if self.current_pitch_note != -1:
                 self.midi.send_note_off(self.current_pitch_note)
                 if self.looper:
                     self.looper.record_event('note_off', note=self.current_pitch_note)
+            # Volume first, even if unchanged, so a DAW recording has each
+            # note's own volume right before it. Otherwise a looped note plays
+            # at whatever volume the previous pass ended on.
+            send_forced = getattr(self.midi, "send_cc_forced", None)
+            (send_forced or self.midi.send_cc)(7, volume)
             self.midi.send_note_on(midi_note)
+            self._note_on_time = time.time()
             if self.looper:
                 self.looper.record_event('note_on', note=midi_note)
             self.current_pitch_note = midi_note

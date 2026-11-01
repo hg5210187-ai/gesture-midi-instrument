@@ -15,6 +15,11 @@ class GestureLogic:
 
         # Right hand state
         self.current_pitch_note = -1
+        # Shortest note before the pitch may change again (0 = no limit). The
+        # Cubase versions set it, because a one-frame flicker made notes of a
+        # few hundredths of a second whose ends Cubase sometimes lost.
+        self.min_note_s = 0.0
+        self._note_on_time = 0.0
 
         # Scale mapping (default Chromatic A2)
         self.scale = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]
@@ -39,6 +44,17 @@ class GestureLogic:
         # has been absent for several consecutive frames.
         self._left_absent_frames = 0
         self._fist_release_frames = 5   # ~150ms at the 30fps vision loop
+
+        # Two more left-hand gestures, used only by a looper that has hold() /
+        # stop() (CubaseTransport): the same fist kept for _hold_seconds after
+        # it toggled calls hold(), and a sustained left thumbout calls stop().
+        # thumbout and closedhand are the classes the detector confuses most,
+        # so the thumb needs more frames than the fist.
+        self._hold_seconds = 2.0
+        self._hold_start = None
+        self._thumb_frames = 0
+        self._thumb_confirm_frames = 8  # ~270ms at the 30fps vision loop
+        self._prev_thumb = False
 
         # Throttle recording of continuous events
         self._last_recorded_volume = -1
@@ -143,16 +159,20 @@ class GestureLogic:
             if self.looper is not None:
                 if left.get("fist") is not None:
                     self._process_left_hand(left["fist"])
+                    self._process_left_thumb(left.get("thumb", False))
                 elif left["kpts"] is not None:
                     self._process_left_hand(self._is_fist(left["kpts"]))
         else:
             self.last_left_bbox = None
             self._fist_frames = 0
+            self._thumb_frames = 0
             # Debounce: only release the held-fist state after sustained
             # absence, so a transient detection dropout doesn't re-trigger.
             self._left_absent_frames += 1
             if self._left_absent_frames >= self._fist_release_frames:
                 self._prev_fist = False
+                self._prev_thumb = False
+                self._hold_start = None
 
     def _extract_right_obb(self, obb_result):
         """Return the right-hand OBB as a dict, or ``None``.
@@ -267,6 +287,7 @@ class GestureLogic:
                     "bbox": bboxes[i],
                     "kpts": None,
                     "fist": names[classes[i]] == "closedhand",
+                    "thumb": names[classes[i]] == "thumbout",
                 }
 
         return right, left
@@ -448,11 +469,13 @@ class GestureLogic:
     # ---- left hand / looper -----------------------------------------------
 
     def _process_left_hand(self, fist):
-        """Toggle the looper on a SUSTAINED fist.
+        """Toggle the looper on a SUSTAINED fist; call hold() on a long one.
 
         The fist must be held for ``_fist_confirm_frames`` consecutive frames
         before it counts, so a single-frame phantom (the pose model briefly
-        mis-reading background/face as a fist) can't toggle the looper.
+        mis-reading background/face as a fist) can't toggle the looper. If the
+        looper has hold(), the same fist kept ``_hold_seconds`` after it
+        toggled calls it once.
         """
         self._fist_frames = self._fist_frames + 1 if fist else 0
         confirmed = self._fist_frames >= self._fist_confirm_frames
@@ -462,13 +485,43 @@ class GestureLogic:
         if confirmed and not self._prev_fist and (now - self._last_toggle_time) > self._toggle_cooldown:
             state = self.looper.toggle()
             self._last_toggle_time = now
+            self._hold_start = now
             # Reset recording throttles when starting a new recording
             if state == "RECORDING":
                 self._last_recorded_volume = -1
                 self._last_recorded_pitch = -99999
             print(f"Looper: {state}")
 
-        self._prev_fist = confirmed
+        # Long hold: an open (or other) left hand ends it.
+        if not fist:
+            self._hold_start = None
+        elif (self._hold_start is not None and now - self._hold_start >= self._hold_seconds
+              and hasattr(self.looper, "hold")):
+            self._hold_start = None
+            state = self.looper.hold()
+            if state == "RECORDING":
+                self._last_recorded_volume = -1
+                self._last_recorded_pitch = -99999
+            print(f"Looper (fist held): {state}")
+
+        # Released only by a left hand that is not a fist (or by absence, in
+        # process()). A fist seen again after a short dropout is the same fist,
+        # still being confirmed, not a new one.
+        if confirmed:
+            self._prev_fist = True
+        elif not fist:
+            self._prev_fist = False
+
+    def _process_left_thumb(self, thumb):
+        """Call the looper's stop() on a SUSTAINED left thumbout, if it has one."""
+        self._thumb_frames = self._thumb_frames + 1 if thumb else 0
+        confirmed = self._thumb_frames >= self._thumb_confirm_frames
+        if confirmed and not self._prev_thumb and hasattr(self.looper, "stop"):
+            print(f"Looper (thumb out): {self.looper.stop()}")
+        if confirmed:
+            self._prev_thumb = True
+        elif not thumb:
+            self._prev_thumb = False
 
     def _is_fist(self, landmarks):
         """Detect fist: fingertips close to palm center relative to hand size."""
@@ -563,13 +616,22 @@ class GestureLogic:
             # Re-arm the bend throttle so the first bend after the gate reopens
             # is recorded cleanly rather than being swallowed as "no change".
             self._last_recorded_pitch = -99999
-        elif midi_note != self.current_pitch_note:
-            # Gate open: (re)trigger the note when the pitch changes.
+        elif midi_note != self.current_pitch_note and (
+                self.current_pitch_note == -1
+                or time.time() - self._note_on_time >= self.min_note_s):
+            # Gate open: (re)trigger the note when the pitch changes (not
+            # before the current note has lasted min_note_s).
             if self.current_pitch_note != -1:
                 self.midi.send_note_off(self.current_pitch_note)
                 if self.looper:
                     self.looper.record_event('note_off', note=self.current_pitch_note)
+            # Volume first, even if unchanged, so a DAW recording has each
+            # note's own volume right before it. Otherwise a looped note plays
+            # at whatever volume the previous pass ended on.
+            send_forced = getattr(self.midi, "send_cc_forced", None)
+            (send_forced or self.midi.send_cc)(7, volume)
             self.midi.send_note_on(midi_note)
+            self._note_on_time = time.time()
             if self.looper:
                 self.looper.record_event('note_on', note=midi_note)
             self.current_pitch_note = midi_note

@@ -45,7 +45,7 @@ latency measured on the laptop the instrument runs on.
 | Right | Up / down | Pitch: the notes of the selected scale, or a continuous glide in Theremin mode |
 | Right | Toward / away from the camera | Volume (MIDI CC 7), from the size of the hand's box |
 | Right | Pull back or leave the frame | Note off: below the volume gate the note is released, not just made quiet |
-| Left | Hold a fist | Looper: idle → recording → playing → idle |
+| Left | Hold a fist | Looper: idle → recording → playing → idle. In the two Cubase programs: fist = record → play, fist kept 2 s = record the next track over the playing loops, thumb out = stop |
 
 The picture is mirrored. A hand on the right half of it is the right hand; a hand on the left
 half is the left hand. In the rotation instrument (`main_rotate.py`) pitch comes from the
@@ -55,7 +55,7 @@ The video shows what the instrument is reading: a box on each hand, the line whe
 sampled, the band of the note being played with its name and frequency (`A4 (440 Hz)`), and
 the looper state.
 
-## The four programs
+## The programs
 
 Each stage of the build left a program that still runs. They share the MIDI engine, looper,
 scales, UI and overlay, and differ in how they see the hands.
@@ -63,6 +63,8 @@ scales, UI and overlay, and differ in how they see the hands.
 | Program | Detector | Model file | What it is |
 |---|---|---|---|
 | ⭐ `main_obb.py` | YOLO26-s detect, 3 gesture classes | `hbb-s-fold1-320.mlpackage` or `.pt` | **The current version and the one to use.** One model for both hands, Core ML, lowest latency |
+| `main_cubase.py` | same as `main_obb.py` | same as `main_obb.py` | `main_obb.py` made for Cubase: the fist records loops in Cubase, the app switches Cubase tracks, the Instrument menu switches HALion Sonic sounds. See [Cubase version](#cubase-version) |
+| `main_cubase_lite.py` | same as `main_obb.py` | same as `main_obb.py` | `main_cubase.py` with a small, fast window: camera picture, Scale, Root Note, 1 / 2 octaves, Calibrate. For playing and filming. `--model x` or `--model v8` swaps the detector. See [Light version](#light-version) |
 | `main_rotate.py` | YOLO26 OBB, 3 gesture classes | `YOLO26<size>-MIDI.pt` | Pitch from rotating the hand. Five model sizes, `--model n\|s\|m\|l\|x` |
 | `main.py` | YOLOv8n hand-pose, 21 keypoints | `yolov8n-hand-pose.pt` | The first working version. Right hand from its box, left-hand fist from keypoints |
 | `main_mediapipe.py` | MediaPipe HandLandmarker | `hand_landmarker.task` (public download) | Needs no trained weights. Added because the YOLO hand-pose model fired on faces and curtains |
@@ -160,15 +162,124 @@ GarageBand also receives the notes, but it ignores Program Change, so the Instru
 does nothing there. Quit GarageBand when using another DAW: it listens to the same bus and
 would play too.
 
+## Cubase version
+
+`main_cubase.py` is the instrument made for Cubase LE / AI / Elements 13. It plays like
+`main_obb.py`, with three differences:
+
+- **The left hand records layered loops in Cubase.** Fist: select the start track (track 1
+  unless chosen in the Cubase Track menu), cycle off, jump to the left locator, record. Fist
+  again: right locator to the playhead, record off, and 0.2 s later cycle on and back to the
+  left locator, so the first recording loops at exactly its own length. A fist kept 2 s while
+  it plays: select the next track, cycle on, back to the left locator and record, so the new
+  part lies on top of the first with the same length; recording stops by itself after one
+  pass. Thumb out: stop.
+  Each loop is a MIDI part on its track.
+- **Cubase Track** (where the Number of Tracks slider was) selects which of the first 8
+  instrument, sampler or MIDI tracks the right hand plays, in MixConsole order.
+- **Instrument** sends Program Change on channel 1 to the selected track. HALion Sonic
+  follows it with GM Mode on.
+
+Volume (CC 7) is sent only when it changes, so recordings are not flooded with it.
+
+It uses two IAC buses: notes on `IAC Driver Bus 1`, control messages on `IAC Driver Bus 2`.
+A MIDI Remote script turns the control messages into Cubase actions.
+
+One-time setup:
+
+1. **Add Bus 2.** Audio MIDI Setup → Window → Show MIDI Studio → IAC Driver → under Ports,
+   `+`, so there is a `Bus 2`; keep "Device is online" ticked.
+2. **Install the MIDI Remote script**, then start (or restart) Cubase:
+   ```bash
+   mkdir -p ~/Documents/Steinberg/"Cubase LE AI Elements"/"MIDI Remote"/"Driver Scripts"/Local
+   cp -R cubase/midi_remote/indigo ~/Documents/Steinberg/"Cubase LE AI Elements"/"MIDI Remote"/"Driver Scripts"/Local/
+   ```
+   The MIDI Remote tab (lower zone) should show *Indigo GestureInstrument*. If it does not,
+   use "+ Add MIDI Controller Surface", pick Indigo → GestureInstrument and set its input to
+   `IAC Driver Bus 2`. Studio → MIDI Remote Manager should list it once, Connected, with
+   five transport buttons and eight track buttons, none marked "Missing". After copying a changed script, press
+   the reload button (↻) there.
+3. **Studio → Studio Setup → MIDI Port Setup.** `IAC Driver Bus 1` ticked under "In 'All MIDI
+   Inputs'"; `IAC Driver Bus 2` **not** ticked, or the control messages are recorded as data.
+   Do not set any track's MIDI output to an IAC bus: it would feed back into Cubase.
+4. **Preferences.** Editing → Project & MixConsole → "Enable Record on Selected MIDI Track"
+   on, and MIDI → "MIDI Thru Active" on. The selected track then hears the right hand.
+5. **Tracks.** Instrument tracks with input `All MIDI Inputs`, MIDI channel `1`, and
+   **Monitor off** (with Monitor on, every such track would play the right hand at once). On
+   a HALion Sonic track, turn on Options → GM Mode so the Instrument menu works.
+6. **Loop start.** Put the left locator where loops should start; the first recording sets
+   the right locator. Set the MIDI cycle-record mode to Keep Last (each layer stops just after
+   one pass, and Keep Last drops the unfinished second pass), turn Auto
+   Quantize off, and keep the loop area empty on other tracks. The app assumes Cubase's
+   count-in is off (the metronome click can be on); with a count-in, set
+   `CUBASE_COUNT_IN_BARS` and `CUBASE_TEMPO` (below).
+
+Then:
+
+```bash
+uv run python main_cubase.py
+```
+
+If `IAC Driver Bus 2` is missing, the program still plays notes and says so at startup; the
+fist and the Cubase Track menu then do nothing. Messages, all on MIDI channel 16 of Bus 2:
+
+| CC | Cubase action | Values |
+|---|---|---|
+| 102 | Record | 127 on, 0 off |
+| 103 | Cycle | 127 on, 0 off |
+| 104 | Stop | 127 presses |
+| 105 | To Left Locator | 127 presses |
+| 106 | Set Right Locator (to the playhead) | 127 presses |
+| 110–117 | Select track 1–8 | 127 selects |
+
+To check the script, open MIDI Remote → Scripting Tools: Open Console. Each message received
+is printed there as `Indigo <name> = <value>`.
+
+### Light version
+
+```bash
+uv run python main_cubase_lite.py
+```
+
+`--model x` runs the same window with the heaviest gesture model, `hbb-x-fold0-416` (YOLO26-x,
+416 px): the most accurate YOLO26 model on the study's test photos, about 24 ms per frame
+instead of 7. `--model v8` runs it with the first version's YOLOv8n hand-pose model, exported
+to Core ML, and `main.py`'s keypoint gesture logic (33 ms per frame). The full demo setup, with the environment it runs on:
+[docs/CUBASE_LITE_DEMO.md](docs/CUBASE_LITE_DEMO.md).
+
+The same instrument and the same Cubase setup, in a small window made for playing and filming:
+
+- The camera picture at the camera's own size (640×480), and four controls: **Scale** and
+  **Root Note** (starting on D minor), **Range** (1 or 2 octaves) and **Calibrate**.
+- Each range ends on the root an octave or two up: D4–D5 (8 notes) or D4–D6 (15 notes) in
+  D minor. The full window's ranges stop one step below it (D4–C5).
+- Volume sensitivity, volume gate and the overlay use the full window's defaults.
+- No Instrument or Cubase Track menu, and no Program Change is sent. Load the sound on the
+  Cubase track, and click a track in Cubase to play it ("Enable Record on Selected MIDI
+  Track" arms it). Switch tracks with the right hand out of view, so no note is held.
+- The left fist records, plays and stops loops in Cubase as above.
+
+Calibrate before each take: hold the right hand where it should be silent (farthest from the
+camera) and press Calibrate. Without it, the place the hand first appears becomes the silent point.
+
+Why it exists: the full window enlarges every frame to fill the screen. On a maximised window
+that took 95 ms per redraw, redrawn every 40 ms, so its menus stopped responding and the
+gesture model's time per frame went from 10 ms to 19 ms on average, with stalls up to 210 ms.
+The light window draws in about 29 ms and leaves the model at 9 ms (measured 2026-10-29 with
+the Core ML model and a synthetic frame). Cubase adds its own output latency on top: Studio →
+Studio Setup → the audio device shows it, and a smaller buffer in its Control Panel lowers it.
+
 ## Environment variables
 
 | Variable | Program | Effect |
 |---|---|---|
-| `MIDI_PORT=<name>` | all | Send to the output whose name contains this text |
-| `CAMERA_INDEX=<n>`, `CAMERA_FPS=<fps>` | `main_obb.py` | Pick another camera, request a frame rate |
-| `HBB_MODEL=<file>`, `HBB_IMGSZ=<px>`, `HBB_DEVICE=mps\|cpu` | `main_obb.py` | Gesture model, input size, PyTorch device |
-| `MIDI_LATENCY_DEBUG=1` | `main_obb.py` | Print loop rate, inference time and frame age at MIDI send every 5 s |
-| `OBB_DEBUG=1` | `main_obb.py` | Print every detection (class, confidence, area, centre) |
+| `MIDI_PORT=<name>` | all but the two Cubase programs | Send to the output whose name contains this text |
+| `CUBASE_NOTES_PORT=<name>`, `CUBASE_CONTROL_PORT=<name>` | `main_cubase.py`, `main_cubase_lite.py` | Exact names of the notes and control outputs (default `IAC Driver Bus 1`, `IAC Driver Bus 2`) |
+| `CAMERA_INDEX=<n>`, `CAMERA_FPS=<fps>` | `main_obb.py`, both Cubase programs | Pick another camera, request a frame rate |
+| `HBB_MODEL=<file>`, `HBB_IMGSZ=<px>`, `HBB_DEVICE=mps\|cpu` | `main_obb.py`, both Cubase programs | Gesture model, input size, PyTorch device |
+| `CUBASE_TEMPO=<bpm>`, `CUBASE_COUNT_IN_BARS=<n>`, `CUBASE_COUNT_IN_BEATS=<n>` | both Cubase programs | Cubase's count-in, if it is on (default 0 bars = off; 4 beats per bar; tempo default 120). A held note is re-sent after it |
+| `MIDI_LATENCY_DEBUG=1` | `main_obb.py`, both Cubase programs | Print loop rate, inference time and frame age at MIDI send every 5 s |
+| `OBB_DEBUG=1` | `main_obb.py`, both Cubase programs | Print every detection (class, confidence, area, centre) |
 | `HAND_DEBUG=1` | `main.py`, `main_mediapipe.py` | Print every raw detection before filtering |
 | `ROT_DEBUG=1` | `main_rotate.py` | Print angle, note, bend and volume per frame |
 
@@ -192,12 +303,16 @@ can respond. How the loop got from about 56 ms to under 10 ms is in
 
 ```
 main_mediapipe.py   main.py   main_rotate.py   main_obb.py     the four programs
+main_cubase.py      main_obb.py made for Cubase
+main_cubase_lite.py main_cubase.py with the light window
 
 src/
   midi_engine.py        MIDI output: notes, CC, pitch bend, program change
+  cubase_control.py     the fist and track menu as Cubase control messages (main_cubase.py)
   scales.py             scale generator, note names, frequencies
   looper.py             records and loops MIDI on its own channel
   ui.py                 settings panel and video window (CustomTkinter)
+  ui_lite.py            the light window: camera picture, scale, root, calibrate
   overlay.py            what is drawn on the video
   logic.py              gestures → MIDI for the keypoint detectors
   logic_obb.py          gestures → MIDI for the gesture-class detector
@@ -212,6 +327,7 @@ src/
 run_benchmark.py  experiment_*.py  task_engine.py  run_dry_run.py
                         playability benchmark: 3 pitch sensitivities × 4 scale types
 tests/check_headless.py feeds synthetic detections through all three logic modules
+cubase/midi_remote/     the Cubase MIDI Remote script for main_cubase.py
 YOLO26<size>-ver        provenance of each rotation model (training date, mAP, speed)
 docs/                   build record, architecture, model procedures, models
 ```

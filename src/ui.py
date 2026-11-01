@@ -7,7 +7,7 @@ from PIL import Image
 
 # General MIDI instruments (display name -> GM program number 0-127). A curated
 # spread of common sounds so switching is one click. Sent as a Program Change;
-# see MidiEngine.send_program_change for the GarageBand caveat.
+# see MidiEngine.send_program_change for which destinations follow it.
 INSTRUMENTS = {
     "Grand Piano": 0,
     "Electric Piano": 4,
@@ -44,10 +44,19 @@ INSTRUMENTS = {
     "Synth Pad (Halo)": 94,
 }
 
+# Scale and root menus, shared with the light window (src/ui_lite.py).
+SCALE_OPTIONS = [
+    "Chromatic", "Major", "Minor",
+    "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian",
+    "Major Pentatonic", "Minor Pentatonic", "Theremin"
+]
+NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
 
 class SettingsUI(ctk.CTk):
     def __init__(self, on_change_callback, on_calibrate=None,
-                 show_rotation_mode=False, on_calibrate_rotation=None):
+                 show_rotation_mode=False, on_calibrate_rotation=None,
+                 cubase_mode=False, on_cubase_track=None):
         super().__init__()
         # ``show_rotation_mode`` reveals the Scale/Continuous toggle used only by
         # the rotation instrument (main_rotate.py). Off for the other versions so
@@ -55,6 +64,11 @@ class SettingsUI(ctk.CTk):
         # "low"/"high"/"reset") adds the rotation-range calibration buttons.
         self._show_rotation_mode = show_rotation_mode
         self.on_calibrate_rotation = on_calibrate_rotation
+        # ``cubase_mode`` (main_cubase.py) swaps the Number of Tracks slider for
+        # a Cubase Track menu and labels the fist status "Cubase".
+        # ``on_cubase_track`` is called with the chosen track index (0-7).
+        self._cubase_mode = cubase_mode
+        self.on_cubase_track = on_cubase_track
         self.title("MIDI Gesture Settings")
         self.geometry("1280x800")
         self.on_change_callback = on_change_callback
@@ -167,12 +181,7 @@ class SettingsUI(ctk.CTk):
         self.scale_label = ctk.CTkLabel(self.settings_frame, text="Scale Type", font=("Arial", 16, "bold"))
         self.scale_label.pack(padx=20, pady=(15, 5), anchor="w")
 
-        scale_options = [
-            "Chromatic", "Major", "Minor",
-            "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian",
-            "Major Pentatonic", "Minor Pentatonic", "Theremin"
-        ]
-        self.scale_type = ctk.CTkOptionMenu(self.settings_frame, values=scale_options,
+        self.scale_type = ctk.CTkOptionMenu(self.settings_frame, values=SCALE_OPTIONS,
                                             command=self._update_settings)
         self.scale_type.set("Chromatic")
         self.scale_type.pack(padx=20, pady=10, fill="x")
@@ -180,8 +189,7 @@ class SettingsUI(ctk.CTk):
         self.root_label = ctk.CTkLabel(self.settings_frame, text="Root Note", font=("Arial", 16, "bold"))
         self.root_label.pack(padx=20, pady=(20, 5), anchor="w")
 
-        notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        self.root_note = ctk.CTkOptionMenu(self.settings_frame, values=notes, command=self._update_settings)
+        self.root_note = ctk.CTkOptionMenu(self.settings_frame, values=NOTES, command=self._update_settings)
         self.root_note.set("A")
         self.root_note.pack(padx=20, pady=10, fill="x")
 
@@ -194,6 +202,13 @@ class SettingsUI(ctk.CTk):
         self.instrument.set("Grand Piano")
         self.instrument.pack(padx=20, pady=10, fill="x")
 
+        if self._cubase_mode:
+            self.instrument_hint = ctk.CTkLabel(
+                self.settings_frame,
+                text="HALion Sonic GM sounds (Options → GM Mode on)",
+                font=("Arial", 11), text_color="gray60", wraplength=260)
+            self.instrument_hint.pack(padx=20, pady=(0, 10))
+
         # Pitch Range
         self.range_label = ctk.CTkLabel(self.settings_frame, text="Pitch Range", font=("Arial", 16, "bold"))
         self.range_label.pack(padx=20, pady=(20, 5), anchor="w")
@@ -203,12 +218,25 @@ class SettingsUI(ctk.CTk):
         self.range_preset.set("Full Range (5 Octaves)")
         self.range_preset.pack(padx=20, pady=10, fill="x")
 
-        self.track_label = ctk.CTkLabel(self.settings_frame, text="Number of Tracks (1-5)", font=("Arial", 16, "bold"))
-        self.track_label.pack(padx=20, pady=(20, 5), anchor="w")
+        if self._cubase_mode:
+            # Cubase Track: which Cubase instrument/MIDI track (MixConsole
+            # order) the right hand plays. Sent only when picked from the menu.
+            self.track_label = ctk.CTkLabel(self.settings_frame, text="Cubase Track",
+                                            font=("Arial", 16, "bold"))
+            self.track_label.pack(padx=20, pady=(20, 5), anchor="w")
 
-        self.track_slider = ctk.CTkSlider(self.settings_frame, from_=1, to=5, number_of_steps=4, command=self._update_settings)
-        self.track_slider.set(3)
-        self.track_slider.pack(padx=20, pady=10, fill="x")
+            self.cubase_track = ctk.CTkOptionMenu(
+                self.settings_frame, values=[f"Track {i}" for i in range(1, 9)],
+                command=self._select_cubase_track)
+            self.cubase_track.set("Track 1")
+            self.cubase_track.pack(padx=20, pady=10, fill="x")
+        else:
+            self.track_label = ctk.CTkLabel(self.settings_frame, text="Number of Tracks (1-5)", font=("Arial", 16, "bold"))
+            self.track_label.pack(padx=20, pady=(20, 5), anchor="w")
+
+            self.track_slider = ctk.CTkSlider(self.settings_frame, from_=1, to=5, number_of_steps=4, command=self._update_settings)
+            self.track_slider.set(3)
+            self.track_slider.pack(padx=20, pady=10, fill="x")
 
         # Volume calibration
         self.calibrate_btn = ctk.CTkButton(self.settings_frame, text="Calibrate Min",
@@ -255,14 +283,16 @@ class SettingsUI(ctk.CTk):
         self.show_pitch_check.select()   # on by default (matches GestureLogic)
         self.show_pitch_check.pack(padx=20, pady=(5, 10), anchor="w")
 
-        # Looper status
-        self.looper_label = ctk.CTkLabel(self.settings_frame, text="Looper: Idle",
+        # Looper status (in Cubase mode the fist drives Cubase's transport)
+        self._looper_prefix = "Cubase" if self._cubase_mode else "Looper"
+        self.looper_label = ctk.CTkLabel(self.settings_frame, text=f"{self._looper_prefix}: Idle",
                                           font=("Arial", 14, "bold"), text_color="gray")
         self.looper_label.pack(padx=20, pady=(20, 5))
 
         self.looper_hint = ctk.CTkLabel(self.settings_frame,
-                                         text="Left hand fist to toggle",
-                                         font=("Arial", 11), text_color="gray60")
+                                         text=("Left hand\nfist: record → play\nhold fist 2 s: record one loop on the next track\nthumb out: stop" if self._cubase_mode
+                                               else "Left hand fist to toggle"),
+                                         font=("Arial", 11), text_color="gray60", justify="left")
         self.looper_hint.pack(padx=20, pady=(0, 10))
 
         self.status_text = ctk.CTkLabel(self.settings_frame, text="Status: Running", text_color="green")
@@ -361,7 +391,7 @@ class SettingsUI(ctk.CTk):
         """Update the looper status label."""
         colors = {"IDLE": "gray", "RECORDING": "red", "PLAYING": "green"}
         self.looper_label.configure(
-            text=f"Looper: {state.capitalize()}",
+            text=f"{self._looper_prefix}: {state.capitalize()}",
             text_color=colors.get(state, "gray")
         )
 
@@ -404,16 +434,23 @@ class SettingsUI(ctk.CTk):
             "root_note": self.root_note.get(),
             "range_preset": self.range_preset.get(),
             "instrument_program": INSTRUMENTS[self.instrument.get()],
-            "tracks": int(self.track_slider.get()),
             "volume_gain": float(self.volume_sensitivity.get()),
             "volume_gate": gate,
             "show_borderlines": bool(self.show_borderlines_check.get()),
             "show_pitch": bool(self.show_pitch_check.get()),
         }
+        if not self._cubase_mode:
+            settings["tracks"] = int(self.track_slider.get())
         # Rotation instrument only: report the Scale/Continuous mode.
         if self._show_rotation_mode:
             settings["rotation_mode"] = self.rotation_mode.get()
         self._settings_queue.put(settings)
+
+    def _select_cubase_track(self, choice):
+        # "Track 3" -> 2. The callback only records the choice (main_cubase.py
+        # applies it on the vision thread), so it is safe on the Tk thread.
+        if self.on_cubase_track:
+            self.on_cubase_track(int(choice.split()[-1]) - 1)
 
     def _calibrate(self):
         if self.on_calibrate:

@@ -9,6 +9,8 @@
 | Program | File it loads | What the file is | Where it comes from |
 |---|---|---|---|
 | ⭐ `main_obb.py` | `hbb-s-fold1-320.mlpackage`, else `hbb-s-fold1-320.pt` | YOLO26-s detect model, 3 gesture classes, 320 px | [`models-v1` release](../../../releases/tag/models-v1) |
+| `main_cubase_lite.py --model v8` | `yolov8n-hand-pose.mlpackage` | `yolov8n-hand-pose.pt` exported to Core ML at 384 px, 6.6 MB | Exported locally; see [below](#models-that-are-not-published) |
+| `main_cubase_lite.py --model x` | `hbb-x-fold0-416.mlpackage` | YOLO26-x detect model, 3 gesture classes, 416 px, 106 MB | Exported locally from the research study's checkpoint; see [below](#models-that-are-not-published) |
 | `main_rotate.py` | `YOLO26<size>-MIDI.pt` | YOLO26 oriented-box model, 3 gesture classes, five sizes | [`models-v1` release](../../../releases/tag/models-v1) |
 | `main_mediapipe.py` | `hand_landmarker.task` | MediaPipe HandLandmarker bundle, 7.8 MB | Public download from Google, below |
 | `main.py` | `yolov8n-hand-pose.pt` | YOLOv8n pose model, one class `hand`, 21 keypoints, 7 MB | A third-party checkpoint, not redistributed here |
@@ -155,5 +157,21 @@ not tried here. Pass another file with
   that backend now.
 - `MIDI-gesture-model.pt`, the nano model delivered by the first cross-validated study in
   August 2026.
+- `hbb-x-fold0-416`, the heaviest gesture model, for `main_cubase_lite.py --model x` (added
+  2026-10-30). It is fold 0 of YOLO26-x at 416 px in the research study: the best validation
+  score of its three folds (0.858), and 0.815 on the held-out test photos against 0.732 for
+  `hbb-s-fold1-320`. 58.8 M parameters against 10.0 M; about 24 ms per frame under Core ML on
+  the M4 against 7 ms. Exported from the study's
+  `midi_results/weights/hbb-x-fold0-416.pt` with
+  `uv run yolo export model=hbb-x-fold0-416.pt format=coreml imgsz=416` (full precision,
+  as for the s model). On the 15 test photos the export gave the same detections as the
+  original above confidence 0.6, with boxes within IoU 0.98.
+- `yolov8n-hand-pose.mlpackage`, for `main_cubase_lite.py --model v8` (added 2026-10-30):
+  `yolov8n-hand-pose.pt` exported with
+  `uv run yolo export model=yolov8n-hand-pose.pt format=coreml imgsz=384`. 17 ms per frame
+  under Core ML against 61 ms with PyTorch on the GPU. On 60 study photos at confidence ≥ 0.7
+  it found the same real hands as the original (boxes within IoU 0.92, keypoints 2.4 % of
+  the hand size apart on average); the original's 6 extra boxes were all at the top edge,
+  where no hand is labelled. Like the `.pt`, it is not redistributed.
 
 Both are described in [MODEL_PROCEDURES.md](MODEL_PROCEDURES.md).
